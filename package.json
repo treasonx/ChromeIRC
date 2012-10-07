@@ -1,0 +1,15 @@
+{
+  "name": "jsirc",
+  "version": "0.0.0",
+  "description": "Multi-environment javascript irc",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": "",
+  "author": "James Morrin",
+  "license": "BSD",
+  "dependencies": {
+    "buster": "~0.6.2"
+  }
+}
