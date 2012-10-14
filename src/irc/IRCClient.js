@@ -1,8 +1,8 @@
 define(['irc/codes', 
+        'EventBus',
         'underscore'], 
-        function(codes, _) {
+      function(codes, EventBus, _) {
 
-    'use strict';
 
     var noop = function() {};
 
@@ -374,7 +374,7 @@ define(['irc/codes',
     function Client(server, nick, net, tls, opt) {
       var self = this;
       var now = new Date().getTime();
-      self.opt = {
+      this.opt = {
         server: server,
         nick: nick,
         password: null,
@@ -396,7 +396,7 @@ define(['irc/codes',
         stripColors: false
       };
 
-      self.opt = _.extend(self.opt, opt);
+      _.extend(this.opt, opt);
 
       this.net = net;
       this.tls = tls;
@@ -406,38 +406,43 @@ define(['irc/codes',
       this.chans = {};
       this._whoisData = {};
 
-      if (self.opt.floodProtection) {
-        self.activateFloodProtection();
+      if (this.opt.floodProtection) {
+        this.activateFloodProtection();
       }
 
-
-      if (self.opt.autoConnect === true) {
-        self.connect();
+      if (this.opt.autoConnect === true) {
+        this.connect();
       }
 
-      self.addListener("raw", function (message) { // {{{
+      EventBus.decorators.pubsub(this);
+    }
+
+    Client.prototype.bindEvents = function() {
+
+      var me = this;
+
+      this.subscribe("raw", function (message) {
         var handler = messageHandlers[message.command];
 
         if(handler != null) {
-          handler(message, self);  
+          handler(message, me);  
         } 
 
-        //log unknown messages
+        //TODO log unknown messages
       });
 
-      self.addListener('kick', function(channel, who, by, reason) {
-        if ( self.opt.autoRejoin ) {
-          self.send.apply(self, ['JOIN'].concat(channel.split(' ')));
+      this.subscribe('kick', function(channel, who, by, reason) {
+        if ( me.opt.autoRejoin ) {
+          me.send.apply(me, ['JOIN'].concat(channel.split(' ')));
         }
       });
 
-      self.addListener('motd', function (motd) {
-        self.opt.channels.forEach(function(channel) {
-          self.send.apply(self, ['JOIN'].concat(channel.split(' ')));
+      this.subscribe('motd', function (motd) {
+        me.opt.channels.forEach(function(channel) {
+          me.send.apply(me, ['JOIN'].concat(channel.split(' ')));
         });
       });
-
-    }
+    };
 
     Client.prototype.chanData = function( name, create ) {
       var key = name.toLowerCase();
@@ -559,9 +564,10 @@ define(['irc/codes',
             me.connect( retryCount + 1 );
           }, me.opt.retryDelay );
         });
-        me.conn.addListener("error", function(exception) {
-          me.emit("netError", exception);
-        });
+      });
+
+      me.conn.addListener("error", function(exception) {
+        me.publish("netError", exception);
       });
     }; 
 
