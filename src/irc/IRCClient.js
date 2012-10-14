@@ -1,9 +1,10 @@
-define(['irc/codes'], function(codes) {
+define(['irc/codes', 
+        'underscore'], 
+        function(codes, _) {
+
     'use strict';
 
     var noop = function() {};
-
-
 
     var messageHandlers = {
       '001': function(message, client) {
@@ -277,7 +278,7 @@ define(['irc/codes'], function(codes) {
         // who, reason, channels
         client.emit('quit', message.nick, message.args[0], channels, message);
       },
-      'rpl_motdstart': function (message, clent) {
+      'rpl_motdstart': function (message, client) {
         client.motd = message.args[1] + "\n";
       },
       'rpl_motd': function (message, client) {
@@ -370,350 +371,371 @@ define(['irc/codes'], function(codes) {
 
 
 
-    function Client(server, nick, opt) {
-        var self = this;
-        self.opt = {
-            server: server,
-            nick: nick,
-            password: null,
-            userName: 'nodebot',
-            realName: 'nodeJS IRC client',
-            port: 6667,
-            debug: false,
-            showErrors: false,
-            autoRejoin: true,
-            autoConnect: true,
-            channels: [],
-            retryCount: null,
-            retryDelay: 2000,
-            secure: false,
-            selfSigned: false,
-            certExpired: false,
-            floodProtection: false,
-            floodProtectionDelay: 1000,
-            stripColors: false
-        };
+    function Client(server, nick, net, tls, opt) {
+      var self = this;
+      var now = new Date().getTime();
+      self.opt = {
+        server: server,
+        nick: nick,
+        password: null,
+        userName: 'unknown_'+now,
+        realName: 'JS IRC client',
+        port: 6667,
+        debug: false,
+        showErrors: false,
+        autoRejoin: true,
+        autoConnect: true,
+        channels: [],
+        retryCount: null,
+        retryDelay: 2000,
+        secure: false,
+        selfSigned: false,
+        certExpired: false,
+        floodProtection: false,
+        floodProtectionDelay: 1000,
+        stripColors: false
+      };
 
-        if (typeof arguments[2] === 'object') {
-            var keys = Object.keys(self.opt);
-            for (var i = 0; i < keys.length; i++) {
-                var k = keys[i];
-                if (arguments[2][k] !== undefined) {
-                    self.opt[k] = arguments[2][k];
-                }
+      self.opt = _.extend(self.opt, opt);
 
-            }
+      this.net = net;
+      this.tls = tls;
+      this.conn = null;
+      this.prefixForMode = {};
+      this.modeForPrefix = {};
+      this.chans = {};
+      this._whoisData = {};
+
+      if (self.opt.floodProtection) {
+        self.activateFloodProtection();
+      }
+
+
+      if (self.opt.autoConnect === true) {
+        self.connect();
+      }
+
+      self.addListener("raw", function (message) { // {{{
+        var handler = messageHandlers[message.command];
+
+        if(handler != null) {
+          handler(message, self);  
+        } 
+
+        //log unknown messages
+      });
+
+      self.addListener('kick', function(channel, who, by, reason) {
+        if ( self.opt.autoRejoin ) {
+          self.send.apply(self, ['JOIN'].concat(channel.split(' ')));
         }
+      });
 
-        if (self.opt.floodProtection) {
-            self.activateFloodProtection();
-        }
-
-
-        if (self.opt.autoConnect === true) {
-            self.connect();
-        }
-
-        self.addListener("raw", function (message) { // {{{
-            switch ( message.command ) {
-                case "err_umodeunknownflag":
-                    break;
-            }
-        }); // }}}
-
-        self.addListener('kick', function(channel, who, by, reason) {
-            if ( self.opt.autoRejoin )
-                self.send.apply(self, ['JOIN'].concat(channel.split(' ')));
+      self.addListener('motd', function (motd) {
+        self.opt.channels.forEach(function(channel) {
+          self.send.apply(self, ['JOIN'].concat(channel.split(' ')));
         });
-        self.addListener('motd', function (motd) {
-            self.opt.channels.forEach(function(channel) {
-                self.send.apply(self, ['JOIN'].concat(channel.split(' ')));
-            });
-        });
+      });
 
-        process.EventEmitter.call(this);
     }
 
+    Client.prototype.chanData = function( name, create ) {
+      var key = name.toLowerCase();
+      if ( create ) {
+        this.chans[key] = this.chans[key] || {
+          key: key,
+          serverName: name,
+          users: {},
+          mode: ''
+        };
+      }
 
-    Client.prototype.conn = null;
-    Client.prototype.prefixForMode = {};
-    Client.prototype.modeForPrefix = {};
-    Client.prototype.chans = {};
-    Client.prototype._whoisData = {};
-    Client.prototype.chanData = function( name, create ) { // {{{
-        var key = name.toLowerCase();
-        if ( create ) {
-            this.chans[key] = this.chans[key] || {
-                key: key,
-                serverName: name,
-                users: {},
-                mode: ''
-            };
+      return this.chans[key];
+    };
+
+    Client.prototype.secureConnect = function() {
+      
+      var creds = this.opt.secure;
+      var me = this;
+      if (typeof this.opt.secure !== 'object') {
+        creds = {};
+      }
+
+      this.conn = this.tls.connect(this.opt.port, this.opt.server, creds, function() {
+        // callback called only after successful socket connection
+        me.conn.connected = true;
+        if (me.conn.authorized ||
+        (me.opt.selfSigned &&
+         me.conn.authorizationError === 'DEPTH_ZERO_SELF_SIGNED_CERT') ||
+        (me.opt.certExpired &&
+         me.conn.authorizationError === 'CERT_HAS_EXPIRED')) {
+            // authorization successful
+          me.conn.setEncoding('utf-8');
+          if ( me.opt.certExpired &&
+          me.conn.authorizationError === 'CERT_HAS_EXPIRED' ) {
+            me.log('Connecting to server with expired certificate');
+          }
+          if ( me.opt.password !==  null ) {
+            me.send( "PASS", me.opt.password );
+          }
+          me.log('Sending irc NICK/USER');
+          me.send("NICK", me.opt.nick);
+          me.nick = me.opt.nick;
+          me.send("USER", me.opt.userName, 8, "*", me.opt.realName);
+          me.emit("connect");
+        } else {
+          // authorization failed
+          me.log(me.conn.authorizationError);
         }
+      });
+      
+    };
 
-        return this.chans[key];
-    } // }}}
     Client.prototype.connect = function ( retryCount, callback ) { // {{{
-        if ( typeof(retryCount) === 'function' ) {
-            callback = retryCount;
-            retryCount = undefined;
-        }
-        retryCount = retryCount || 0;
-        if (typeof(callback) === 'function') {
-            this.once('registered', callback);
-        }
-        var self = this;
-        self.chans = {};
+      var me = this;
+      var buffer = '';
+
+      if ( typeof(retryCount) === 'function' ) {
+        callback = retryCount;
+        retryCount = undefined;
+      }
+      retryCount = retryCount || 0;
+      if (typeof(callback) === 'function') {
+        this.once('registered', callback);
+      }
+      this.chans = {};
         // try to connect to the server
-        if (self.opt.secure) {
-            var creds = self.opt.secure;
-            if (typeof self.opt.secure !== 'object') {
-                creds = {};
+      if (this.opt.secure) {
+        this.secureConnect();
+      } else {
+        this.conn = this.net.createConnection(this.opt.port, this.opt.server);
+      }
+      this.conn.requestedDisconnect = false;
+      this.conn.setTimeout(0);
+      this.conn.setEncoding('utf8');
+      this.conn.addListener("connect", function () {
+        if ( me.opt.password !==  null ) {
+          me.send( "PASS", me.opt.password );
+        }
+        me.send("NICK", me.opt.nick);
+        me.nick = me.opt.nick;
+        me.send("USER", me.opt.userName, 8, "*", me.opt.realName);
+        me.emit("connect");
+      });
+      
+      this.conn.addListener("data", function (chunk) {
+        buffer += chunk;
+        var lines = buffer.split("\r\n");
+        buffer = lines.pop();
+        lines.forEach(function (line) {
+          var message = parseMessage(line, me.opt.stripColors);
+          try {
+            me.emit('raw', message);
+          } catch ( err ) {
+            if ( !me.conn.requestedDisconnect ) {
+              throw err;
             }
-
-            self.conn = tls.connect(self.opt.port, self.opt.server, creds, function() {
-                // callback called only after successful socket connection
-                self.conn.connected = true;
-                if (self.conn.authorized ||
-                    (self.opt.selfSigned &&
-                        self.conn.authorizationError === 'DEPTH_ZERO_SELF_SIGNED_CERT') ||
-                    (self.opt.certExpired &&
-                        self.conn.authorizationError === 'CERT_HAS_EXPIRED')) {
-                    // authorization successful
-                    self.conn.setEncoding('utf-8');
-                    if ( self.opt.certExpired &&
-                        self.conn.authorizationError === 'CERT_HAS_EXPIRED' ) {
-                        util.log('Connecting to server with expired certificate');
-                    }
-                    if ( self.opt.password !==  null ) {
-                        self.send( "PASS", self.opt.password );
-                    }
-                    util.log('Sending irc NICK/USER');
-                    self.send("NICK", self.opt.nick);
-                    self.nick = self.opt.nick;
-                    self.send("USER", self.opt.userName, 8, "*", self.opt.realName);
-                    self.emit("connect");
-                } else {
-                    // authorization failed
-                    util.log(self.conn.authorizationError);
-                }
-            });
-        }else {
-            self.conn = net.createConnection(self.opt.port, self.opt.server);
-        }
-        self.conn.requestedDisconnect = false;
-        self.conn.setTimeout(0);
-        self.conn.setEncoding('utf8');
-        self.conn.addListener("connect", function () {
-            if ( self.opt.password !==  null ) {
-                self.send( "PASS", self.opt.password );
-            }
-            self.send("NICK", self.opt.nick);
-            self.nick = self.opt.nick;
-            self.send("USER", self.opt.userName, 8, "*", self.opt.realName);
-            self.emit("connect");
+          }
         });
-        var buffer = '';
-        self.conn.addListener("data", function (chunk) {
-            buffer += chunk;
-            var lines = buffer.split("\r\n");
-            buffer = lines.pop();
-            lines.forEach(function (line) {
-                var message = parseMessage(line, self.opt.stripColors);
-                try {
-                    self.emit('raw', message);
-                } catch ( err ) {
-                    if ( !self.conn.requestedDisconnect ) {
-                        throw err;
-                    }
-                }
-            });
+        
+      });
+        
+      this.conn.addListener("end", function() {
+        me.log('Connection got "end" event');
+        me.conn.addListener("close", function() {
+          me.log('Connection got "close" event');
+          if ( me.conn.requestedDisconnect ) {
+            return;
+          }
+          me.log('Disconnected: reconnecting');
+          if ( me.opt.retryCount !== null && retryCount >= me.opt.retryCount ) {
+            me.log( 'Maximum retry count (' + me.opt.retryCount + ') reached. Aborting' );
+            me.emit( 'abort', me.opt.retryCount );
+            return;
+          }
+
+          me.log( 'Waiting ' + me.opt.retryDelay + 'ms before retrying' );
+          setTimeout( function() {
+            me.connect( retryCount + 1 );
+          }, me.opt.retryDelay );
         });
-        self.conn.addListener("end", function() {
-            if ( self.opt.debug )
-                util.log('Connection got "end" event');
+        me.conn.addListener("error", function(exception) {
+          me.emit("netError", exception);
         });
-        self.conn.addListener("close", function() {
-            if ( self.opt.debug )
-                util.log('Connection got "close" event');
-            if ( self.conn.requestedDisconnect )
-                return;
-            if ( self.opt.debug )
-                util.log('Disconnected: reconnecting');
-            if ( self.opt.retryCount !== null && retryCount >= self.opt.retryCount ) {
-                if ( self.opt.debug ) {
-                    util.log( 'Maximum retry count (' + self.opt.retryCount + ') reached. Aborting' );
-                }
-                self.emit( 'abort', self.opt.retryCount );
-                return;
-            }
+      });
+    }; 
 
-            if ( self.opt.debug ) {
-                util.log( 'Waiting ' + self.opt.retryDelay + 'ms before retrying' );
-            }
-            setTimeout( function() {
-                self.connect( retryCount + 1 );
-            }, self.opt.retryDelay );
-        });
-        self.conn.addListener("error", function(exception) {
-            self.emit("netError", exception);
-        });
-    }; // }}}
-    Client.prototype.disconnect = function ( message, callback ) { // {{{
-        if ( typeof(message) === 'function' ) {
-            callback = message;
-            message = undefined;
+    Client.prototype.disconnect = function ( message, callback ) {
+      if ( typeof message === 'function' ) {
+        callback = message;
+        message = undefined;
+      }
+      message = message || "chrome-irc says goodbye";
+      if ( this.conn.readyState === 'open' ) {
+        this.send( "QUIT", message );
+      }
+      this.conn.requestedDisconnect = true;
+      if (typeof callback === 'function') {
+        this.conn.once('end', callback);
+      }
+      this.conn.end();
+    };
+
+    Client.prototype.send = function(command) {
+      var args = Array.prototype.slice.call(arguments);
+
+      // Remove the command
+      args.shift();
+
+      if ( args[args.length-1].match(/\s/) ) {
+        args[args.length-1] = ":" + args[args.length-1];
+      }
+
+      this.log('SEND: ' + command + " " + args.join(" "));
+
+      if ( ! this.conn.requestedDisconnect ) {
+        this.conn.write(command + " " + args.join(" ") + "\r\n");
+      }
+    };
+
+    Client.prototype.activateFloodProtection = function(interval) { 
+
+      var cmdQueue = [],
+          safeInterval = interval || this.opt.floodProtectionDelay,
+          origSend = this.send,
+          me = this,
+          dequeue;
+
+      // Wrapper for the original function. Just put everything to on central
+      // queue.
+      this.send = function() {
+        cmdQueue.push(arguments);
+      };
+
+      dequeue = function() {
+        var args = cmdQueue.shift();
+        if (args) {
+          origSend.apply(me, args);
         }
-        message = message || "node-irc says goodbye";
-        var self = this;
-        if ( self.conn.readyState == 'open' ) {
-            self.send( "QUIT", message );
-        }
-        self.conn.requestedDisconnect = true;
-        if (typeof(callback) === 'function') {
-            self.conn.once('end', callback);
-        }
-        self.conn.end();
-    }; // }}}
-    Client.prototype.send = function(command) { // {{{
-        var args = Array.prototype.slice.call(arguments);
+      };
 
-        // Remove the command
-        args.shift();
+      // Slowly unpack the queue without flooding.
+      setInterval(dequeue, safeInterval);
+      dequeue();
 
-        if ( args[args.length-1].match(/\s/) ) {
-            args[args.length-1] = ":" + args[args.length-1];
-        }
+    };
 
-        if ( this.opt.debug )
-            util.log('SEND: ' + command + " " + args.join(" "));
-
-        if ( ! this.conn.requestedDisconnect ) {
-            this.conn.write(command + " " + args.join(" ") + "\r\n");
-        }
-    }; // }}}
-    Client.prototype.activateFloodProtection = function(interval) { // {{{
-
-        var cmdQueue = [],
-            safeInterval = interval || this.opt.floodProtectionDelay,
-            self = this,
-            origSend = this.send,
-            dequeue;
-
-        // Wrapper for the original function. Just put everything to on central
-        // queue.
-        this.send = function() {
-            cmdQueue.push(arguments);
-        };
-
-        dequeue = function() {
-            var args = cmdQueue.shift();
-            if (args) {
-                origSend.apply(self, args);
-            }
-        };
-
-        // Slowly unpack the queue without flooding.
-        setInterval(dequeue, safeInterval);
-        dequeue();
-
-
-    }; // }}}
-    Client.prototype.join = function(channel, callback) { // {{{
+    Client.prototype.join = function(channel, callback) {
         this.once('join' + channel, function () {
-            // if join is successful, add this channel to opts.channels
-            // so that it will be re-joined upon reconnect (as channels
-            // specified in options are)
-            if (this.opt.channels.indexOf(channel) == -1) {
-                this.opt.channels.push(channel);
-            }
+          // if join is successful, add this channel to opts.channels
+          // so that it will be re-joined upon reconnect (as channels
+          // specified in options are)
+          if (this.opt.channels.indexOf(channel) === -1) {
+            this.opt.channels.push(channel);
+          }
 
-            if ( typeof(callback) == 'function' ) {
-                return callback.apply(this, arguments);
-            }
+          if ( typeof callback === 'function' ) {
+            return callback.apply(this, arguments);
+          }
         });
         this.send.apply(this, ['JOIN'].concat(channel.split(' ')));
-    } // }}}
-    Client.prototype.part = function(channel, callback) { // {{{
-        if ( typeof(callback) == 'function' ) {
-            this.once('part' + channel, callback);
-        }
+    };
 
-        // remove this channel from this.opt.channels so we won't rejoin
-        // upon reconnect
-        if (this.opt.channels.indexOf(channel) != -1) {
-            this.opt.channels.splice(this.opt.channels.indexOf(channel), 1);
-        }
+    Client.prototype.part = function(channel, callback) {
+      if ( typeof callback === 'function' ) {
+        this.once('part' + channel, callback);
+      }
 
-        this.send('PART', channel);
-    } // }}}
-    Client.prototype.say = function(target, text) { // {{{
-        var self = this;
-        if (typeof text !== 'undefined') {
-            text.toString().split(/\r?\n/).filter(function(line) {
-                return line.length > 0;
-            }).forEach(function(line) {
-                    self.send('PRIVMSG', target, line);
-                    self.emit('selfMessage', target, line);
-                });
-        }
-    } // }}}
-    Client.prototype.action = function(channel, text) { // {{{
-        var self = this;
-        if (typeof text !== 'undefined') {
-            text.toString().split(/\r?\n/).filter(function(line) {
-                return line.length > 0;
-            }).forEach(function(line) {
-                    self.say(channel, '\u0001ACTION ' + line + '\u0001');
-                });
-        }
-    } // }}}
-    Client.prototype.notice = function(target, text) { // {{{
+      // remove this channel from this.opt.channels so we won't rejoin
+      // upon reconnect
+      if (this.opt.channels.indexOf(channel) !== -1) {
+        this.opt.channels.splice(this.opt.channels.indexOf(channel), 1);
+      }
+      this.send('PART', channel);
+    };
+
+    Client.prototype.say = function(target, text) {
+      var me = this;
+      if (text != null) {
+        text.toString().split(/\r?\n/).filter(function(line) {
+          return line.length > 0;
+        }).forEach(function(line) {
+          me.send('PRIVMSG', target, line);
+          me.emit('selfMessage', target, line);
+        });
+      }
+    };
+
+    Client.prototype.action = function(channel, text) {
+      var me = this;
+      if ( text != null) {
+        text.toString().split(/\r?\n/).filter(function(line) {
+          return line.length > 0;
+        }).forEach(function(line) {
+          me.say(channel, '\u0001ACTION ' + line + '\u0001');
+        });
+      }
+    };
+
+    Client.prototype.notice = function(target, text) {
         this.send('NOTICE', target, text);
-    } // }}}
-    Client.prototype.whois = function(nick, callback) { // {{{
-        if ( typeof callback === 'function' ) {
-            var callbackWrapper = function(info) {
-                if ( info.nick == nick ) {
-                    this.removeListener('whois', callbackWrapper);
-                    return callback.apply(this, arguments);
-                }
-            };
-            this.addListener('whois', callbackWrapper);
-        }
-        this.send('WHOIS', nick);
-    } // }}}
-    Client.prototype.list = function() { // {{{
+    };
+
+    Client.prototype.whois = function(nick, callback) {
+      var callbackWrapper = null;
+      if ( typeof callback === 'function' ) {
+        callbackWrapper = function(info) {
+          if ( info.nick === nick ) {
+            this.removeListener('whois', callbackWrapper);
+            return callback.apply(this, arguments);
+          }
+        };
+        this.addListener('whois', callbackWrapper);
+      }
+      this.send('WHOIS', nick);
+    };
+
+    Client.prototype.list = function() {
         var args = Array.prototype.slice.call(arguments, 0);
         args.unshift('LIST');
         this.send.apply(this, args);
-    } // }}}
-    Client.prototype._addWhoisData = function(nick, key, value, onlyIfExists) { // {{{
-        if ( onlyIfExists && !this._whoisData[nick] ) return;
-        this._whoisData[nick] = this._whoisData[nick] || {nick: nick};
-        this._whoisData[nick][key] = value;
-    } // }}}
-    Client.prototype._clearWhoisData = function(nick) { // {{{
-        var data = this._whoisData[nick];
-        delete this._whoisData[nick];
-        return data;
-    } // }}}
+    };
+
+    Client.prototype._addWhoisData = function(nick, key, value, onlyIfExists) {
+      if ( onlyIfExists && !this._whoisData[nick] ) {
+        return;
+      }
+      this._whoisData[nick] = this._whoisData[nick] || {nick: nick};
+      this._whoisData[nick][key] = value;
+    };
+    
+    Client.prototype._clearWhoisData = function(nick) {
+      var data = this._whoisData[nick];
+      delete this._whoisData[nick];
+      return data;
+    };
+
     Client.prototype._handleCTCP = function(from, to, text, type) {
-        text = text.slice(1)
-        text = text.slice(0, text.indexOf('\1'))
-        var parts = text.split(' ')
-        this.emit('ctcp', from, to, text, type)
-        this.emit('ctcp-'+type, from, to, text)
-        if (type === 'privmsg' && text === 'VERSION')
-            this.emit('ctcp-version', from, to)
-        if (parts[0] === 'ACTION' && parts.length > 1)
-            this.emit('action', from, to, parts.slice(1).join(' '))
-        if (parts[0] === 'PING' && type === 'privmsg' && parts.length > 1)
-            this.ctcp(from, 'notice', text)
-    }
+      var parts = null;
+      text = text.slice(1);
+      text = text.slice(0, text.indexOf('\1'));
+      parts = text.split(' ');
+      this.emit('ctcp', from, to, text, type);
+      this.emit('ctcp-'+type, from, to, text);
+      if (type === 'privmsg' && text === 'VERSION') {
+        this.emit('ctcp-version', from, to);
+      }
+      if (parts[0] === 'ACTION' && parts.length > 1) {
+        this.emit('action', from, to, parts.slice(1).join(' '));
+      }
+      if (parts[0] === 'PING' && type === 'privmsg' && parts.length > 1) {
+        this.ctcp(from, 'notice', text);
+      }
+    };
+
     Client.prototype.ctcp = function(to, type, text) {
-        return this[type === 'privmsg' ? 'say' : 'notice'](to, '\1'+text+'\1');
-    }
+      return this[type === 'privmsg' ? 'say' : 'notice'](to, '\1'+text+'\1');
+    };
 
     /*
      * parseMessage(line, stripColors)
@@ -721,61 +743,65 @@ define(['irc/codes'], function(codes) {
      * takes a raw "line" from the IRC server and turns it into an object with
      * useful keys
      */
-    function parseMessage(line, stripColors) { // {{{
-        var message = {};
-        var match;
+    function parseMessage(line, stripColors) {
+      var message = {};
+      var match = null;
+      var middle, trailing;
 
-        if (stripColors) {
-            line = line.replace(/[\x02\x1f\x16\x0f]|\x03\d{0,2}(?:,\d{0,2})?/g, "");
+      if (stripColors) {
+        line = line.replace(/[\x02\x1f\x16\x0f]|\x03\d{0,2}(?:,\d{0,2})?/g, "");
+      }
+
+      // Parse prefix
+      match = line.match(/^:([^ ]+) +/); 
+      if (match) {
+        message.prefix = match[1];
+        line = line.replace(/^:[^ ]+ +/, '');
+        match = message.prefix.match(/^([_a-zA-Z0-9\[\]\\`^{}|-]*)(!([^@]+)@(.*))?$/); 
+        if (match) {
+          message.nick = match[1];
+          message.user = match[3];
+          message.host = match[4];
+        } else {
+          message.server = message.prefix;
         }
+      }
 
-        // Parse prefix
-        if ( match = line.match(/^:([^ ]+) +/) ) {
-            message.prefix = match[1];
-            line = line.replace(/^:[^ ]+ +/, '');
-            if ( match = message.prefix.match(/^([_a-zA-Z0-9\[\]\\`^{}|-]*)(!([^@]+)@(.*))?$/) ) {
-                message.nick = match[1];
-                message.user = match[3];
-                message.host = match[4];
-            }
-            else {
-                message.server = message.prefix;
-            }
-        }
+      // Parse command
+      match = line.match(/^([^ ]+) */);
+      message.command = match[1];
+      message.rawCommand = match[1];
+      message.commandType = 'normal';
+      line = line.replace(/^[^ ]+ +/, '');
 
-        // Parse command
-        match = line.match(/^([^ ]+) */);
-        message.command = match[1];
-        message.rawCommand = match[1];
-        message.commandType = 'normal';
-        line = line.replace(/^[^ ]+ +/, '');
+      if ( codes[message.rawCommand] ) {
+        message.command = codes[message.rawCommand].name;
+        message.commandType = codes[message.rawCommand].type;
+      }
 
-        if ( codes[message.rawCommand] ) {
-            message.command     = codes[message.rawCommand].name;
-            message.commandType = codes[message.rawCommand].type;
-        }
+      message.args = [];
 
-        message.args = [];
-        var middle, trailing;
+      // Parse parameters
+      if ( line.indexOf(':') !== -1 ) {
+        match = line.match(/(.*)(?:^:|\s+:)(.*)/);
+        middle = match[1].trimRight();
+        trailing = match[2];
+      } else {
+        middle = line;
+      }
 
-        // Parse parameters
-        if ( line.indexOf(':') != -1 ) {
-            match = line.match(/(.*)(?:^:|\s+:)(.*)/);
-            middle = match[1].trimRight();
-            trailing = match[2];
-        }
-        else {
-            middle = line;
-        }
+      if ( middle.length ) {
+        message.args = middle.split(/ +/);
+      }
 
-        if ( middle.length )
-            message.args = middle.split(/ +/);
+      if ( trailing != null && trailing.length ) {
+        message.args.push(trailing);
+      }
 
-        if ( typeof(trailing) != 'undefined' && trailing.length )
-            message.args.push(trailing);
+      return message;
+    }
 
-        return message;
-    } // }}}
+    return Client;
 
 
 });
