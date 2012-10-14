@@ -50,6 +50,34 @@
           expect(mockConnection.addListener.getCall(2).args[0]).toEqual('end');
           expect(mockConnection.addListener.getCall(3).args[0]).toEqual('error');
         });
+
+      });
+
+      describe('client login', function() {
+        it('should log into server', function() {
+          expect(false).toBeTruthy();  
+        }); 
+      });
+
+      describe('client message handling', function() {
+        it('should handle messages', function() {
+          
+          expect(false).toBeTruthy();  
+        });
+      });
+
+      describe('client error handling', function() {
+        it('should handle errors', function() {
+          
+          expect(false).toBeTruthy();  
+        });  
+      });
+
+      describe('client command handing', function() {
+        it('should handle server commands', function() {
+          
+          expect(false).toBeTruthy();  
+        });  
       });
 
 
